@@ -120,14 +120,17 @@ env_init(void)
 	// Set up envs array
 	// LAB 3: Your code here.
 	int32_t i;
-    	for (i = NENV - 1; i >= 0; i--) {
-        	envs[i].env_link = env_free_list;
-        	envs[i].env_status = ENV_FREE;
-        	envs[i].env_runs = 0;
-        	envs[i].env_type = ENV_TYPE_USER;
-        	envs[i].env_pgdir = NULL;
-        	env_free_list = &envs[i];
-    	}
+
+	for (i = NENV - 1; i >= 0; i--) {
+		envs[i].env_link = env_free_list;
+		envs[i].env_status = ENV_FREE;
+		envs[i].env_id = 0;
+		envs[i].env_runs = 0;
+		envs[i].env_type = ENV_TYPE_USER;
+		envs[i].env_pgdir = NULL;
+		env_free_list = &envs[i];
+	}
+
 	// Per-CPU part of the initialization
 	env_init_percpu();
 }
@@ -258,6 +261,7 @@ env_alloc(struct Env **newenv_store, envid_t parent_id)
 
 	// Enable interrupts while in user mode.
 	// LAB 4: Your code here.
+	e->env_tf.tf_eflags |= FL_IF;
 
 	// Clear the page fault handler until user installs one.
 	e->env_pgfault_upcall = 0;
@@ -374,6 +378,7 @@ load_icode(struct Env *e, uint8_t *binary)
 				panic("load_icode: ph->p_filesz [%d] > ph->p_memsz [%d]",
 				      ph->p_filesz,
 				      ph->p_memsz);
+
 			region_alloc(e, (void *)ph->p_va, ph->p_memsz);
 			memset((void *)ph->p_va, 0, ph->p_memsz);
 			memcpy((void *)ph->p_va, binary + ph->p_offset, ph->p_filesz);
@@ -401,15 +406,17 @@ void
 env_create(uint8_t *binary, enum EnvType type)
 {
 	// LAB 3: Your code here.
-	struct Env *e[1];
-	uint32_t err;
+	struct Env *e;
 
-	err = env_alloc(e, 0);
-	if (err != 0)
-		panic("env_create: failed - %e", e);
+	int result = env_alloc(&e, 0);
+	if (result == -E_NO_FREE_ENV)
+        	panic("env_create: no free environment (exceeding NENVS)");
+	else if (result == -E_NO_MEM)
+		panic("env_create: not enough memory");
 
-	load_icode(e[0], binary);
-	e[0]->env_type = type;
+	load_icode(e, binary);
+
+	e->env_type = type;
 }
 
 //
@@ -480,7 +487,6 @@ env_destroy(struct Env *e)
 		e->env_status = ENV_DYING;
 		return;
 	}
-
 	env_free(e);
 
 	if (curenv == e) {
@@ -540,7 +546,7 @@ env_run(struct Env *e)
 	//	e->env_tf to sensible values.
 
 	// LAB 3: Your code here.
-	if (curenv != e) {
+	if (curenv != e ) {
 		if (curenv && curenv->env_status == ENV_RUNNING)
 			curenv->env_status = ENV_RUNNABLE;
 		curenv = e;

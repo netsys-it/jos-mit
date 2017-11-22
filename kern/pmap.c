@@ -134,9 +134,6 @@ mem_init(void)
 	// Find out how much memory the machine has (npages & npages_basemem).
 	i386_detect_memory();
 
-	// Remove this line when you're ready to test this function.
-	//panic("mem_init: This function is not finished\n");
-
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
 	kern_pgdir = (pde_t *) boot_alloc(PGSIZE);
@@ -287,16 +284,17 @@ mem_init_mp(void)
 	//     Permissions: kernel RW, user NONE
 	//
 	// LAB 4: Your code here:
-		
-	uintptr_t zaciatok = KSTACKTOP - KSTKSIZE;
+	size_t i;
+	uint32_t kstacktop_i;
 
-    int i;
-    for (i = 0; i != NCPU; ++i)
-	 {
-        	boot_map_region(kern_pgdir,zaciatok,KSTKSIZE,PADDR(percpu_kstacks[i]),PTE_W);
-        	zaciatok -= (KSTKSIZE + KSTKGAP);
+        for (i = 0; i < NCPU; i++) {
+		kstacktop_i = KSTACKTOP - i * (KSTKSIZE + KSTKGAP);
+		boot_map_region(kern_pgdir,
+				kstacktop_i - KSTKSIZE,
+				ROUNDUP(KSTKSIZE, PGSIZE),
+				PADDR(percpu_kstacks[i]),
+                                PTE_W | PTE_P);
 	}
-
 }
 
 // --------------------------------------------------------------
@@ -311,6 +309,7 @@ mem_init_mp(void)
 // allocator functions below to allocate and deallocate physical
 // memory via the page_free_list.
 //
+
 void
 page_init(void)
 {
@@ -337,22 +336,22 @@ page_init(void)
 	// free pages!
 	size_t i;
 	for (i = 1; i < npages_basemem; i++) {
-		if( i != MPENTRY_PADDR/PGSIZE )
-		{
-			pages[i].pp_ref = 0;
-			pages[i].pp_link = page_free_list;
-			page_free_list = &pages[i];
+		if (i == PGNUM(MPENTRY_PADDR)) {
+			pages[i].pp_ref = 1;
+			pages[i].pp_link = NULL;
+			continue;
 		}
-	}
-	int next = PGNUM(PADDR(boot_alloc(0)));
-	
-	for (i = next; i < npages; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
 	}
+	i = PGNUM(PADDR(boot_alloc(0)));
+        for (; i < npages; i++) {
+                        pages[i].pp_ref = 0;
+                        pages[i].pp_link = page_free_list;
+                        page_free_list = &pages[i];
+        }
 }
-
 
 //
 // Allocates a physical page.  If (alloc_flags & ALLOC_ZERO), fills the entire
@@ -611,17 +610,16 @@ mmio_map_region(physaddr_t pa, size_t size)
 	// Hint: The staff solution uses boot_map_region.
 	//
 	// Your code here:
+	uintptr_t ret = base;
+	base += ROUNDUP(size, PGSIZE);
 
-	size = ROUNDUP(pa+size, PGSIZE);
-	pa = ROUNDDOWN(pa,PGSIZE);
-	size = size - pa;
-	if( (base+size) >= MMIOLIM) panic("malo miesta");
-	boot_map_region(kern_pgdir,base,size,pa, PTE_PCD | PTE_PWT | PTE_W);
-	base = base+size;
+	if (base > MMIOLIM)
+		panic("mmio_map_region: overflow");
 
-	return (void*)(base - size);
+	boot_map_region(kern_pgdir, ret, ROUNDUP(size, PGSIZE),
+			pa, PTE_PCD | PTE_PWT | PTE_W | PTE_P);
 
-//panic("mmio_map_region not implemented");
+	return (void *)ret;
 }
 
 static uintptr_t user_mem_check_addr;
@@ -648,25 +646,18 @@ int
 user_mem_check(struct Env *env, const void *va, size_t len, int perm)
 {
 	// LAB 3: Your code here.
-	uintptr_t ptr = (uintptr_t) ROUNDDOWN(va, PGSIZE);
-	uintptr_t ptrend = (uintptr_t) ROUNDUP(va + len + 1, PGSIZE);
-	pte_t *pte;
-	for (; ptr< ptrend; ptr += PGSIZE) {
-		if (ptr >= ULIM) {
-			user_mem_check_addr = ptr;
-			return -E_FAULT;
-		}
-		pte = pgdir_walk(env->env_pgdir, (void *)ptr, 0);
-		if (!pte) {
-			user_mem_check_addr = ptr < (uintptr_t)va ? (uintptr_t)va : ptr;
-			return -E_FAULT;
-		}
-		if (((*pte) & perm) != perm) {
-			user_mem_check_addr = ptr < (uintptr_t)va ? (uintptr_t)va : ptr;
+	// cprintf("user_mem_check va: %x, len: %x\n", va, len);
+	uint32_t begin = (uint32_t) ROUNDDOWN(va, PGSIZE); 
+	uint32_t end = (uint32_t) ROUNDUP(va+len, PGSIZE);
+	uint32_t i;
+	for (i = (uint32_t)begin; i < end; i+=PGSIZE) {
+		pte_t *pte = pgdir_walk(env->env_pgdir, (void*)i, 0);
+		// pprint(pte);
+		if ((i>=ULIM) || !pte || !(*pte & PTE_P) || ((*pte & perm) != perm)) {
+			user_mem_check_addr = (i<(uint32_t)va?(uint32_t)va:i);
 			return -E_FAULT;
 		}
 	}
-	
 	return 0;
 }
 

@@ -29,23 +29,25 @@ sched_yield(void)
 	// below to halt the cpu.
 
 	// LAB 4: Your code here.
-
-	struct Env *e;
-	int i;
-	int cur_idx = curenv ? ENVX( curenv->env_id ) % NENV : 0;
+	int i, envx, cur;
+	if (curenv)
+		cur = ENVX(curenv->env_id);
+	else	cur = 0;
 	
-	for (i = 0; i < NENV; i++) {
-		int cur = ( cur_idx + i ) % NENV;
-		if (envs[cur].env_status == ENV_RUNNABLE) {
-			env_run( &envs[ENVX( cur )] );
+	for (i = 0; i < NENV; ++i) {
+		envx = ENVX((cur + i) % NENV);
+		if (envs[envx].env_status == ENV_RUNNABLE) {
+			env_run(&envs[envx]);
 		}
 	}
-
-	if (curenv && curenv->env_status == ENV_RUNNING){
+	
+	if (curenv && curenv->env_status == ENV_RUNNING)
 		env_run(curenv);
-	}
+	
+	// sched_halt never returns
 	sched_halt();
 }
+
 // Halt this CPU when there is nothing to do. Wait until the
 // timer interrupt wakes it up. This function never returns.
 //
@@ -87,7 +89,7 @@ sched_halt(void)
 		"pushl $0\n"
 		"pushl $0\n"
 		// Uncomment the following line after completing exercise 13
-		//"sti\n"
+		"sti\n"
 		"1:\n"
 		"hlt\n"
 		"jmp 1b\n"

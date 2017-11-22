@@ -82,7 +82,7 @@ spin_lock(struct spinlock *lk)
 void
 spin_unlock(struct spinlock *lk)
 {
-#ifdef DEBUG_SPINLOCK
+//#ifdef DEBUG_SPINLOCK
 	if (!holding(lk)) {
 		int i;
 		uint32_t pcs[10];
@@ -105,7 +105,7 @@ spin_unlock(struct spinlock *lk)
 
 	lk->pcs[0] = 0;
 	lk->cpu = 0;
-#endif
+//#endif
 
 	// The xchg instruction is atomic (i.e. uses the "lock" prefix) with
 	// respect to any other instruction which references the same memory.
