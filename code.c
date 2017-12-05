@@ -543,6 +543,158 @@ uintptr_t ret = base;
 }
 
 LAB 5
+kern/env.c
+edit env_create() and add at the end:
+	if (type == ENV_TYPE_FS) {
+                e->env_tf.tf_eflags |= FL_IOPL_3;
+        }
+
+fs/bc.c
+static void
+bc_pgfault(struct UTrapframe *utf)
+{
+        void *addr = (void *) utf->utf_fault_va;
+        uint32_t blockno = ((uint32_t)addr - DISKMAP) / BLKSIZE;
+        int r;
+        if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
+                panic("page fault in FS: eip %08x, va %08x, err %04x",
+                      utf->utf_eip, addr, utf->utf_err);
+        if (super && blockno >= super->s_nblocks)
+                panic("reading non-existent block %08x\n", blockno);
+        addr = ROUNDDOWN(addr, PGSIZE);
+	if ((r = sys_page_alloc(0, addr, (PTE_W | PTE_U | PTE_P))) < 0)
+                panic("bc_pgfault: sys_page_alloc failed %e", r);
+        if ((r = ide_read(blockno * BLKSECTS, addr, BLKSECTS)))
+                panic("bc_pgfault: ide_read failed %e", r);
+        if ((r = sys_page_map(0, addr, 0, addr, uvpt[PGNUM(addr)] & PTE_SYSCALL)) < 0)
+                panic("in bc_pgfault, sys_page_map: %e", r);
+        if (bitmap && block_is_free(blockno))
+                panic("reading free block %08x\n", blockno);
+}
+void
+flush_block(void *addr)
+{
+        uint32_t blockno = ((uint32_t)addr - DISKMAP) / BLKSIZE;
+        if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
+                panic("flush_block of bad va %08x", addr);
+        int r;
+        if (!(va_is_mapped(addr) && va_is_dirty(addr)))
+                return;
+        addr = ROUNDDOWN(addr, PGSIZE);
+        if(va_is_mapped(addr) && va_is_dirty(addr)) {
+                if((r = ide_write(blockno * BLKSECTS, addr, BLKSECTS)))
+                        panic("flush_block: ide_write failed %e", r);
+                if((r = sys_page_map(0, addr, 0, addr, uvpt[PGNUM(addr)] & PTE_SYSCALL)) != 0)
+                        panic("flush_block: sys_page_map failed %e", r);
+        }
+}	
+
+fs/fs.c
+int
+alloc_block(void)
+{
+        int blockno;
+        for (blockno = 0; blockno < super->s_nblocks; blockno++) {
+                if (block_is_free(blockno)) {
+                        flush_block(diskaddr(blockno));
+                        bitmap[blockno / 32] &= ~(1 << (blockno % 32));
+                        return blockno;
+                }
+        }
+        return -E_NO_DISK;
+}
+static int
+file_block_walk(struct File *f, uint32_t filebno, uint32_t **ppdiskbno, bool alloc)
+{
+        int blockno;
+        if (filebno > NDIRECT + NINDIRECT)
+                return -E_INVAL;
+        if (filebno < NDIRECT)
+                *ppdiskbno = &f->f_direct[filebno];
+        else {
+                if (!f->f_indirect) {
+                        if (alloc){
+                                blockno = alloc_block();
+                                if (blockno < 0)
+                                        return -E_NO_DISK;
+                                memset(diskaddr(blockno), 0, BLKSIZE);
+                                f->f_indirect = blockno;
+                        }
+                        else return -E_NOT_FOUND;
+                }
+                *ppdiskbno = &((uintptr_t *) diskaddr(f->f_indirect))[filebno - NDIRECT];
+        }
+        return 0;
+}
+int
+file_get_block(struct File *f, uint32_t filebno, char **blk)
+{
+        uint32_t *ppdiskbno;
+        int r = file_block_walk(f, filebno, &ppdiskbno, 1);
+
+        if (r < 0)
+                return r;
+        if (!(*ppdiskbno)) {
+                r = alloc_block();
+                if (r < 0)
+                        return -E_NO_DISK;
+                *ppdiskbno = r;
+        }
+        *blk = diskaddr(*ppdiskbno);
+        return 0;
+}
+
+fs/serv.c
+int
+serve_read(envid_t envid, union Fsipc *ipc)
+{
+        struct Fsreq_read *req = &ipc->read;
+        struct Fsret_read *ret = &ipc->readRet;
+        if (debug)
+                cprintf("serve_read %08x %08x %08x\n", envid, req->req_fileid, req->req_n);
+        struct OpenFile *o;
+        int r;
+        if ((r = openfile_lookup(envid, req->req_fileid, &o)) < 0)
+                return r;
+        int req_n = req->req_n > PGSIZE ? PGSIZE : req->req_n;
+        if ((r = file_read(o->o_file, ret->ret_buf, req_n, o->o_fd->fd_offset)) < 0)
+                return r;
+        if(r == 0)
+                return -E_INVAL;
+        o->o_fd->fd_offset += r;
+        return r;
+}
+int
+serve_write(envid_t envid, struct Fsreq_write *req)
+{
+        if (debug)
+                cprintf("serve_write %08x %08x %08x\n", envid, req->req_fileid, req->req_n);.
+        struct OpenFile *o;
+        int r;
+        if ((r = openfile_lookup(envid, req->req_fileid, &o)) < 0)
+                return r;
+        int req_n = req->req_n > PGSIZE ? PGSIZE : req->req_n;
+        if ((r = file_write(o->o_file, req->req_buf, req_n, o->o_fd->fd_offset)) < 0)
+                return r;
+        o->o_fd->fd_offset += r;
+        return r;
+}
+
+lib/file.c
+static ssize_t
+devfile_write(struct Fd *fd, const void *buf, size_t n)
+{
+        struct Fsreq_write *req = &fsipcbuf.write;
+        req->req_fileid = fd->fd_file.id;
+        ssize_t r = sizeof(req->req_buf);
+        if (n < r)
+                r = n;
+        req->req_n = r;
+        memmove(req->req_buf,buf, r);
+        ssize_t wr = fsipc(FSREQ_WRITE, NULL);
+        return wr;
+}
+
 kern/syscall.c
 static int
 sys_env_set_trapframe(envid_t envid, struct Trapframe *tf)
@@ -560,6 +712,130 @@ sys_env_set_trapframe(envid_t envid, struct Trapframe *tf)
 }
 case SYS_ipc_try_send:
                 return sys_ipc_try_send(a1, a2, (void*)a3, a4);
+
+lib/fork.c 
+static int
+duppage(envid_t envid, unsigned pn)
+{
+        int r;
+        void *addr;
+        pte_t pte;
+        int perm;
+        addr = (void *)((uint32_t)pn * PGSIZE);
+        pte = uvpt[pn];
+        if (pte & PTE_SHARE) {
+            if ((r = sys_page_map(sys_getenvid(), addr, envid, addr, pte & PTE_SYSCALL)) < 0) {
+                        panic("duppage: page mapping failed %e", r);
+                        return r;
+                }
+        }
+        else {
+                perm = PTE_P | PTE_U;
+                if ((pte & PTE_W) || (pte & PTE_COW))
+                        perm |= PTE_COW;
+                if ((r = sys_page_map(thisenv->env_id, addr, envid, addr, perm)) < 0) {
+                        panic("duppage: page remapping failed %e", r);
+                        return r;
+                }
+                if (perm & PTE_COW) {
+                        if ((r = sys_page_map(thisenv->env_id, addr, thisenv->env_id, addr, perm)) < 0) {
+                                panic("duppage: page remapping failed %e", r);
+                                return r;
+                        }
+                }
+        }
+        return 0;
+}
+
+lib/spawn.c
+static int
+copy_shared_pages(envid_t child)
+{
+        uintptr_t i;
+        for (i = 0; i < USTACKTOP; i += PGSIZE) {
+                if ((uvpd[PDX(i)] & PTE_P) &&
+                (uvpt[PGNUM(i)] & PTE_P) &&
+                (uvpt[PGNUM(i)] & PTE_SHARE)) {
+                        sys_page_map(0, (void*)i,
+                                child, (void*)i,
+                                (uvpt[PGNUM(i)] & PTE_SYSCALL));
+                }
+        }
+        return 0;
+}
+
+kern/trap.c
+static void
+trap_dispatch(struct Trapframe *tf)
+{
+        if (tf->tf_trapno == 14) // TH_PGFLT
+        {
+                page_fault_handler(tf);
+                return;
+        }
+        if (tf->tf_trapno == 3) // TH_BRKPT
+        {
+                monitor(tf);
+                return;
+        }
+        if (tf->tf_trapno == 48) // TH_SYSCALL
+        {
+                uint32_t ret = syscall(tf->tf_regs.reg_eax,
+                                        tf->tf_regs.reg_edx,
+                                        tf->tf_regs.reg_ecx,
+                                        tf->tf_regs.reg_ebx,
+                                        tf->tf_regs.reg_edi,
+                                        tf->tf_regs.reg_esi);
+                tf->tf_regs.reg_eax = ret;
+                return;
+        }
+        if (tf->tf_trapno == IRQ_OFFSET + IRQ_SPURIOUS) {
+                cprintf("Spurious interrupt on irq 7\n");
+                print_trapframe(tf);
+		                return;
+        }
+        if (tf->tf_trapno == IRQ_OFFSET + IRQ_TIMER) {
+                lapic_eoi();
+                sched_yield();
+                return;
+        }
+        if (tf->tf_trapno == IRQ_OFFSET + IRQ_KBD) {
+                kbd_intr();
+                return;
+        }
+        if (tf->tf_trapno == IRQ_OFFSET + IRQ_SERIAL) {
+                serial_intr();
+                return;
+        }
+        print_trapframe(tf);
+        if (tf->tf_cs == GD_KT)
+                panic("unhandled trap in kernel");
+        else {
+                env_destroy(curenv);
+                return;
+        }
+}
+
+user/sh.c
+	if (gettoken(0, &t) != 'w') {
+		cprintf("syntax error: < not followed by word\n");
+		exit();
+	}
+	if ((fd = open(t, O_RDONLY)) < 0) {
+		cprintf("file not found: %s\n", t);
+		exit();
+	}
+	if (fd == 0) {
+		cprintf("file descriptor is zero.\n");
+		exit();
+	}
+	if ((r = dup(fd, 0)) < 0) {
+		cprintf("dup error: %e\n", r);
+		exit();
+	}
+	close(fd);
+	break;
+		
 
 static int
 sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
@@ -633,21 +909,4 @@ alloc_block(void)
                 }
         }
         return -E_NO_DISK;
-}
-int
-file_get_block(struct File *f, uint32_t filebno, char **blk)
-{
-        uint32_t *ppdiskbno;
-        int r = file_block_walk(f, filebno, &ppdiskbno, 1);
-
-        if (r < 0)
-                return r;
-        if (!(*ppdiskbno)) {
-                r = alloc_block();
-                if (r < 0)
-                        return -E_NO_DISK;
-                *ppdiskbno = r;
-        }
-        *blk = diskaddr(*ppdiskbno);
-        return 0;
 }
