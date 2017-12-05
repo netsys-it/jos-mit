@@ -619,3 +619,35 @@ static void bc_pgfault(struct UTrapframe *utf){
         if (bitmap && block_is_free(blockno))
                 panic("reading free block %08x\n", blockno);
 }
+fs/fs.c
+int
+alloc_block(void)
+{
+        int blockno;
+
+        for (blockno = 0; blockno < super->s_nblocks; blockno++) {
+                if (block_is_free(blockno)) {
+                        flush_block(diskaddr(blockno));
+                        bitmap[blockno / 32] &= ~(1 << (blockno % 32));
+                        return blockno;
+                }
+        }
+        return -E_NO_DISK;
+}
+int
+file_get_block(struct File *f, uint32_t filebno, char **blk)
+{
+        uint32_t *ppdiskbno;
+        int r = file_block_walk(f, filebno, &ppdiskbno, 1);
+
+        if (r < 0)
+                return r;
+        if (!(*ppdiskbno)) {
+                r = alloc_block();
+                if (r < 0)
+                        return -E_NO_DISK;
+                *ppdiskbno = r;
+        }
+        *blk = diskaddr(*ppdiskbno);
+        return 0;
+}
