@@ -1,3 +1,97 @@
+// LAB 4
+// lib/fork.c
+// Custo  page fault handler - if faulting page is copy-on-write,
+// map in our own private writable copy.
+//
+static void
+pgfault(struct UTrapframe *utf)
+{
+        void *addr = (void *) utf->utf_fault_va;
+        uint32_t err = utf->utf_err;
+        int r;
+
+        // Funkcia 'pgfault()' skontroluje, či ide o chybu zápisu (kontroluje chybový kód, 
+        // či obsahuje príznak 'FEC_WR'
+        // či je príslušný záznam PTE cieľovej stránky označený ako PTE_COW
+
+        // Check that the faulting access was (1) a write, and (2) to a
+        // copy-on-write page.  If not, panic.
+        // Hint:
+        //   Use the read-only page table mappings at uvpt
+        //   (see <inc/memlayout.h>).
+
+        // LAB 4: Your code here.
+        if (
+                (err & FEC_WR) == 0 ||
+                (uvpd[PDX(addr)] & PTE_P)n== 0 ||
+                (uvpt[PGNUM(addr)] & PTE_P) == 0 ||
+                (uvpt[PGNUM(addr)] & PTE_COW) == 0)
+
+                panic("pgfault: Not copy-on-write");
+        r = sys_page_alloc(0, (void*)PFTEMP, PTE_U | PTE_W | PTE_P);
+        if (r < 0)
+                panic("pgfault: sys_page_alloc failed: %e", r);
+
+        addr = ROUNDDOWN(addr, PGSIZE);
+        memcpy(PFTEMP, addr, PGSIZE);
+
+        r = sys_page_map(0, (void*)PFTEMP, 0, addr, PTE_U | PTE_W | PTE_P);
+        if(r < 0)
+                panic("pgfault: sys_page_map failed with %e", r);
+
+        r = sys_page_unmap(0, (void*) PFTEMP);
+        if(r < 0)
+                panic("pgfault: sys_page_unmap failed with %e", r);
+}
+// User-level fork with copy-on-write.
+// Set up our page fault handler appropriately.
+// Create a child.
+// Copy our address space and page fault handler setup to the child.
+// Then mark the child as runnable and return.
+//
+// Returns: child's envid to the parent, 0 to the child, < 0 on error.
+// It is also OK to panic on error.
+//
+// Hint:
+//   Use uvpd, uvpt, and duppage.
+//   Remember to fix "thisenv" in the child process.
+//   Neither user exception stack should ever be marked copy-on-write,
+//   so you must allocate a new page for the child's user exception stack.
+//
+envid_t
+fork(void) // kopiruje mapovania stranok - nastavuje mapovanie stranok v detskom procese
+{
+        set_pgfault_handler(pgfault); //rodič inštaluje obsluhu výpadkov stránok v užívateľsko priestore
+        envid_t envid;
+        uintptr_t addr;
+        int r;
+        envid = sys_exofork(); // Rodič zavolá 'sys_exofork()', čím vytvorí potomka. 
+        if(envid == 0){
+                thisenv = &envs[ENVX(sys_getenvid())];
+                return 0;
+        }
+        if(envid < 0)
+                panic("sys_exofork: %e", envid);
+        for(addr = UTEXT; addr < USTACKTOP; addr += PGSIZE){
+                if ((uvpd[PDX(addr)] & PTE_P) && (uvpt[PGNUM(addr)] & PTE_P) && (uvpt[PGNUM(addr)] & PTE_U))
+                        duppage(envid, PGNUM(addr));
+        }
+        r = sys_page_alloc(envid, (void*)(UXSTACKTOP-PGSIZE), PTE_P|PTE_U|PTE_W);
+        if(r < 0)
+                panic("fork: sys_page_alloc failed with %e", r);
+
+        // Rodič nastaví vstupný bod obsluhy výnimiek výpadku stránok v užívateľskom priestore pre potomka
+        r = sys_env_set_pgfault_upcall(envid, thisenv->env_pgfault_upcall);
+        if(r < 0)
+                panic("fork: sys_env_set_pgfault_upcall failed with %e", r);
+
+        // Potomok je nachystaný na spustenie, takže rodič ho označí ako spustiteľný. 
+        r = sys_env_set_status(envid, ENV_RUNNABLE);
+        if(r < 0)
+                panic("fork: sys_env_set_status failed with %e", r);
+        return envid;
+}
+
 // LAB 5
 // kern/env.c
 void
