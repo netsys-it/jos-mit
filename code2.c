@@ -1,4 +1,49 @@
 // LAB 4
+// kern/pmap.c
+        if (ROUNDUP(base + size, PGSIZE) >= MMIOLIM)
+                panic("mmio_map_region(): mapping over MMIOLIM");
+        boot_map_region(kern_pgdir, base, ROUNDUP(size, PGSIZE), ROUNDDOWN(pa, PGSIZE), PTE_PCD|PTE_PWT|PTE_W);
+
+        uintptr_t ret = base;
+        base = ROUNDUP(base + size, PGSIZE);
+        return (void*) ret;
+
+void
+sched_yield(void)
+{
+        struct Env *idle;
+
+        // Implement simple round-robin scheduling.
+        //
+        // Search through 'envs' for an ENV_RUNNABLE environment in
+        // circular fashion starting just after the env this CPU was
+        // last running.  Switch to the first such environment found.
+        //
+        // If no envs are runnable, but the environment previously
+        // running on this CPU is still ENV_RUNNING, it's okay to
+        // choose that environment.
+        //
+        // Never choose an environment that's currently running on
+        // another CPU (env_status == ENV_RUNNING). If there are
+        // no runnable environments, simply drop through to the code
+        // below to halt the cpu.
+
+        // LAB 4: Your code here.
+        uint32_t envs_index = 0;
+        if (curenv)
+          envs_index = ENVX(curenv->env_id);    //ak uz nejaky enviroment bezal, zisti jeho index v envs
+
+        for (uint32_t i = 0; i < NENV; i++) {
+          uint32_t index = (envs_index + i) % NENV;
+          if (envs[index].env_status == ENV_RUNNABLE)
+                env_run(envs + index);
+        }
+        if (curenv && (curenv->env_status == ENV_RUNNING))
+                env_run(curenv);
+
+        // sched_halt never returns
+        sched_halt();
+}
 // lib/fork.c
 // Custo  page fault handler - if faulting page is copy-on-write,
 // map in our own private writable copy.
